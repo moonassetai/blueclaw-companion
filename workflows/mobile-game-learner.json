@@ -1,0 +1,75 @@
+{
+  "name": "mobile-game-learner",
+  "schema_version": 1,
+  "description": "Generic rule-based learning layer for mobile game screen classification and next-action suggestion.",
+  "notes": [
+    "Profiles stay intentionally small and are meant to be edited by hand.",
+    "Action targets can be plain tap coordinates or label-oriented tap hints.",
+    "Unknown screens should remain non-mutating until the profile is improved."
+  ],
+  "profiles": {
+    "generic": {
+      "package_name": null,
+      "known_state_hints": {
+        "loading": ["loading", "connecting", "checking resources"],
+        "login": ["guest login", "guest", "start game", "sign in"],
+        "tutorial": ["tap to continue", "skip", "next", "guide"],
+        "battle": ["battle", "fight", "auto", "stage start"],
+        "reward": ["reward", "claim", "collect"],
+        "menu": ["campaign", "mission", "inventory", "summon", "home"],
+        "upgrade": ["upgrade", "enhance", "level up", "confirm"]
+      },
+      "action_targets": {
+        "login_continue": {
+          "type": "text_match_tap",
+          "labels": ["Guest Login", "Start Game", "Login", "Sign In"],
+          "notes": "Try guest or primary login entry points first."
+        },
+        "tutorial_continue": {
+          "type": "text_match_tap",
+          "labels": ["Next", "Skip", "Tap to Continue"],
+          "notes": "Move through low-risk tutorial gates."
+        },
+        "battle_continue": {
+          "type": "text_match_tap",
+          "labels": ["Battle", "Fight", "Auto"],
+          "notes": "Only safe for games where battle entry is repetitive and low-risk."
+        },
+        "reward_claim": {
+          "type": "text_match_tap",
+          "labels": ["Claim", "Collect", "Receive"],
+          "notes": "Claim obvious rewards when present."
+        },
+        "menu_primary": {
+          "type": "text_match_tap",
+          "labels": ["Campaign", "Mission", "Quest"],
+          "notes": "Use the main progression entry point from the home/menu screen."
+        },
+        "upgrade_confirm": {
+          "type": "text_match_tap",
+          "labels": ["Upgrade", "Enhance", "Confirm"],
+          "notes": "Only use after the upgrade screen is confidently detected."
+        }
+      },
+      "notes": "Generic starter profile for unknown games. Refine the hints after observing real UI dumps."
+    },
+    "maplestory_idle_example": {
+      "package_name": "com.nexon.ma",
+      "known_state_hints": {
+        "login": ["guest", "start game", "server"],
+        "battle": ["battle", "auto"],
+        "reward": ["claim", "reward"],
+        "menu": ["mission", "quest", "summon"],
+        "upgrade": ["level up", "upgrade"]
+      },
+      "action_targets": {
+        "login_continue": {
+          "type": "text_match_tap",
+          "labels": ["Guest", "Start Game"],
+          "notes": "Example only. Confirm labels from a fresh UI dump before relying on them."
+        }
+      },
+      "notes": "Illustrative example based on prior BlueStacks notes. Treat it as a template, not a finished bot."
+    }
+  }
+}

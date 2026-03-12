@@ -1,0 +1,63 @@
+{
+  "name": "metamask-onboarding-until-sensitive-step",
+  "description": "Open MetaMask and stop before any secret or signature boundary.",
+  "defaults": {
+    "package": "io.metamask"
+  },
+  "steps": [
+    {
+      "id": "connect",
+      "action": "script",
+      "script": "connect-bluestacks.ps1"
+    },
+    {
+      "id": "open_metamask",
+      "action": "script",
+      "script": "open-app.ps1",
+      "params": {
+        "Package": "{package}"
+      }
+    },
+    {
+      "id": "capture_metamask",
+      "action": "capture_and_classify"
+    },
+    {
+      "id": "check_sign_request",
+      "action": "branch_on_state",
+      "state": "metamask_sign_screen",
+      "on_match": "sensitive_boundary",
+      "on_no_match": "check_onboarding"
+    },
+    {
+      "id": "check_onboarding",
+      "action": "branch_on_state",
+      "state": "metamask_onboarding",
+      "on_match": "tap_get_started",
+      "on_no_match": "stop_unknown"
+    },
+    {
+      "id": "tap_get_started",
+      "action": "tap_ui_text",
+      "labels": [
+        "Get started",
+        "Get Started"
+      ]
+    },
+    {
+      "id": "capture_after_get_started",
+      "action": "capture_and_classify"
+    },
+    {
+      "id": "sensitive_boundary",
+      "action": "approval_required",
+      "sensitive": true,
+      "message": "MetaMask is at a sensitive boundary. Handle seed phrase, password, import, or signature approval manually."
+    },
+    {
+      "id": "stop_unknown",
+      "action": "stop",
+      "message": "MetaMask opened, but the screen does not match the current onboarding rules. Inspect the saved XML and screenshot before adding more steps."
+    }
+  ]
+}

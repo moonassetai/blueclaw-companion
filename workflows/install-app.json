@@ -1,0 +1,68 @@
+{
+  "name": "install-app",
+  "description": "Open a Play Store app page, classify it, and tap Install when a native Play Store button is found.",
+  "defaults": {
+    "package": "",
+    "app_name": ""
+  },
+  "steps": [
+    {
+      "id": "connect",
+      "action": "script",
+      "script": "connect-bluestacks.ps1"
+    },
+    {
+      "id": "open_details",
+      "action": "script",
+      "script": "open-playstore-details.ps1",
+      "params": {
+        "Package": "{package}"
+      }
+    },
+    {
+      "id": "capture_store",
+      "action": "capture_and_classify"
+    },
+    {
+      "id": "check_store_state",
+      "action": "branch_on_state",
+      "state": "playstore_app_page",
+      "on_match": "tap_install",
+      "on_no_match": "fallback_search"
+    },
+    {
+      "id": "fallback_search",
+      "action": "script",
+      "script": "open-playstore-search.ps1",
+      "params": {
+        "Query": "{app_name}"
+      }
+    },
+    {
+      "id": "capture_search",
+      "action": "capture_and_classify"
+    },
+    {
+      "id": "stop_search",
+      "action": "stop",
+      "message": "Play Store search results are open. Select the matching result manually, then rerun the workflow or continue with install once the app page is visible."
+    },
+    {
+      "id": "tap_install",
+      "action": "tap_ui_text",
+      "labels": [
+        "Install",
+        "Update"
+      ]
+    },
+    {
+      "id": "capture_after_install_tap",
+      "action": "capture_and_classify"
+    },
+    {
+      "id": "stop_after_install",
+      "action": "stop",
+      "message": "Install or update was requested. Watch for account prompts or permission dialogs before proceeding."
+    }
+  ]
+}

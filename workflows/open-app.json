@@ -1,0 +1,31 @@
+{
+  "name": "open-app",
+  "description": "Launch an installed package and classify the resulting screen.",
+  "defaults": {
+    "package": ""
+  },
+  "steps": [
+    {
+      "id": "connect",
+      "action": "script",
+      "script": "connect-bluestacks.ps1"
+    },
+    {
+      "id": "open_app",
+      "action": "script",
+      "script": "open-app.ps1",
+      "params": {
+        "Package": "{package}"
+      }
+    },
+    {
+      "id": "capture_app",
+      "action": "capture_and_classify"
+    },
+    {
+      "id": "stop_after_open",
+      "action": "stop",
+      "message": "App launch requested and the current screen was classified."
+    }
+  ]
+}

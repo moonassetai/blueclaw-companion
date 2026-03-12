@@ -1,0 +1,4 @@
+# Phase 2 intentionally runs on the Python standard library only.
+# Optional OCR hook dependencies, if you choose to enable them later:
+# pillow
+# pytesseract

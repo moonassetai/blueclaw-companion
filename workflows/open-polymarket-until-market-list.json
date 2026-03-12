@@ -1,0 +1,43 @@
+{
+  "name": "open-polymarket-until-market-list",
+  "description": "Launch Polymarket and stop once the market list is visible.",
+  "defaults": {
+    "package": "com.polymarket"
+  },
+  "steps": [
+    {
+      "id": "connect",
+      "action": "script",
+      "script": "connect-bluestacks.ps1"
+    },
+    {
+      "id": "open_polymarket",
+      "action": "script",
+      "script": "open-app.ps1",
+      "params": {
+        "Package": "{package}"
+      }
+    },
+    {
+      "id": "capture_polymarket",
+      "action": "capture_and_classify"
+    },
+    {
+      "id": "check_market_list",
+      "action": "branch_on_state",
+      "state": "polymarket_market_list",
+      "on_match": "stop_market_list",
+      "on_no_match": "stop_not_ready"
+    },
+    {
+      "id": "stop_market_list",
+      "action": "stop",
+      "message": "Polymarket market list is visible."
+    },
+    {
+      "id": "stop_not_ready",
+      "action": "stop",
+      "message": "Polymarket did not classify as the market list yet. The saved artifacts show where the flow currently lands."
+    }
+  ]
+}
