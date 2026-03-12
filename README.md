@@ -11,6 +11,39 @@ There is now also a small **desktop automation layer** for cases where ADB input
 
 There is also a lightweight **shortcut acceleration layer** that resolves perception/control backends and prepares future integrations like scrcpy and vision-model classification hooks.
 
+## Main Runtime UX (Recommended)
+
+Primary entrypoint:
+
+```powershell
+python -m blueclaw_companion run <command> [options]
+```
+
+Windows launcher shortcut:
+
+```powershell
+.\run.ps1 <command> [options]
+```
+
+Runtime command set:
+
+- `connect`
+- `inspect`
+- `capture`
+- `learner`
+- `workflow`
+- `focus`
+- `send-key`
+- `click`
+
+The `inspect` command is the default happy-path flow and performs:
+
+1. BlueStacks detection/focus (desktop-capable modes)
+2. ADB connect attempt (adb-capable modes when requested)
+3. capture + classify
+4. learner profile load
+5. next-action suggestion
+
 ## Prerequisites
 
 - Windows OS
@@ -29,6 +62,23 @@ There is also a lightweight **shortcut acceleration layer** that resolves percep
 3. **Connect to Emulator**:
    - The tooling will automatically probe standard BlueStacks ADB ports (e.g., `127.0.0.1:5555`, `127.0.0.1:5556`) and attempt to connect utilizing Phase 1 scripts.
    - Or connect manually: `adb connect 127.0.0.1:5555` followed by `adb devices`.
+
+## Quick Start
+
+```powershell
+# One-command happy path (launcher)
+.\run.ps1 inspect --mode hybrid --connect-adb --json
+
+# Inspect/capture through desktop mode
+.\run.ps1 inspect --mode desktop --use-ocr --json
+.\run.ps1 capture --mode desktop --output .\artifacts\runtime-capture.png --json
+
+# Learner/workflow through main runtime UX
+.\run.ps1 learner --mode hybrid --profile generic --connect-adb --json
+.\run.ps1 workflow open-app --mode adb --var package=com.nexon.ma --json
+```
+
+`--mode` supports `adb`, `desktop`, and `hybrid` (hybrid currently resolves to desktop when BlueStacks window is found, otherwise adb fallback).
 
 ## How to Run Phase 1 (Scripts)
 
@@ -68,6 +118,14 @@ Desktop-side BlueStacks helpers are also available when you need emulator-window
 .\scripts\focus-bluestacks.ps1 -WindowTitleContains "BlueStacks" -ExpectedClientWidth 1600 -ExpectedClientHeight 900
 ```
 
+Runtime wrappers for these controls:
+
+```powershell
+.\run.ps1 focus --mode desktop
+.\run.ps1 send-key --mode desktop --key "{TAB}" --repeat-count 2 --delay-ms 100
+.\run.ps1 click --mode desktop --x 300 --y 500 --repeat-count 1
+```
+
 ## How to Run Phase 2 (Workflow Logic)
 
 Phase 2 uses declarative JSON files located in `workflows/` mapped to corresponding python and shell layers.
@@ -81,6 +139,12 @@ python -m blueclaw_companion workflow run --workflow open-polymarket-until-marke
 
 # Run with custom variables
 python -m blueclaw_companion workflow run --workflow install-app --var PackageName=com.example.app
+```
+
+The `run workflow` path is now the preferred user-facing wrapper:
+
+```powershell
+.\run.ps1 workflow open-polymarket-until-market-list --mode adb --json
 ```
 
 ## How to Run `mobile-game-learner`
@@ -106,6 +170,12 @@ python -m blueclaw_companion workflow run --workflow open-app --execution-mode d
 python -m blueclaw_companion learner run --profile generic --xml .\artifacts\dump.xml --json
 ```
 
+The `run learner` path is now the preferred user-facing wrapper:
+
+```powershell
+.\run.ps1 learner --mode hybrid --profile generic --connect-adb --json
+```
+
 `--control-mode adb` remains the default. Use `--control-mode desktop` when the game only reacts reliably to the Windows-side BlueStacks window or when you need keyboard-driven actions.
 
 Desktop target options (`learner run`, `learner loop`, `workflow run`):
@@ -115,6 +185,8 @@ Desktop target options (`learner run`, `learner loop`, `workflow run`):
 - `--expected-client-width`
 - `--expected-client-height`
 - `--desktop-fullscreen-fallback` / `--no-desktop-fullscreen-fallback`
+
+These target options also apply to `run inspect|capture|learner|workflow|focus|send-key|click`.
 
 Env fallback keys:
 

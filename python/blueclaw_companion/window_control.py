@@ -135,6 +135,16 @@ def _get_process_name(process_id: int) -> str:
         KERNEL32.CloseHandle(handle)
 
 
+def _hwnd_to_int(hwnd: object) -> int:
+    if isinstance(hwnd, int):
+        return int(hwnd)
+    try:
+        return int(hwnd)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        value = ctypes.cast(hwnd, ctypes.c_void_p).value  # type: ignore[arg-type]
+        return int(value or 0)
+
+
 def _build_window_metadata(hwnd: int) -> WindowMetadata:
     process_id = wintypes.DWORD()
     USER32.GetWindowThreadProcessId(hwnd, ctypes.byref(process_id))
@@ -168,7 +178,7 @@ def _build_window_metadata(hwnd: int) -> WindowMetadata:
         client_width=int(client_width),
         client_height=int(client_height),
         is_minimized=bool(USER32.IsIconic(hwnd)),
-        is_foreground=int(foreground) == int(hwnd),
+        is_foreground=_hwnd_to_int(foreground) == _hwnd_to_int(hwnd),
     )
 
 
@@ -274,9 +284,10 @@ def focus_bluestacks_window(
     hwnd = wintypes.HWND(window.handle)
     if window.is_minimized:
         USER32.ShowWindow(hwnd, SW_RESTORE)
+    hwnd_value = _hwnd_to_int(hwnd)
 
     if window.is_foreground:
-        return validate_window_geometry(_build_window_metadata(int(hwnd)), resolved_options)
+        return validate_window_geometry(_build_window_metadata(hwnd_value), resolved_options)
 
     attempts = max(1, int(resolved_options.focus_retries))
     delay_seconds = max(0, int(resolved_options.focus_retry_delay_ms)) / 1000.0
@@ -284,11 +295,11 @@ def focus_bluestacks_window(
         USER32.SetForegroundWindow(hwnd)
         if delay_seconds > 0:
             time.sleep(delay_seconds)
-        refreshed = _build_window_metadata(int(hwnd))
+        refreshed = _build_window_metadata(hwnd_value)
         if refreshed.is_foreground:
             return validate_window_geometry(refreshed, resolved_options)
 
-    final_window = _build_window_metadata(int(hwnd))
+    final_window = _build_window_metadata(hwnd_value)
     if final_window.is_foreground:
         return validate_window_geometry(final_window, resolved_options)
     raise RuntimeError(

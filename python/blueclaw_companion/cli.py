@@ -9,6 +9,17 @@ from .execution_mode import DesktopOptions, DesktopTarget, resolve_desktop_optio
 from .game_profiles import list_game_profiles
 from .long_run_policy import run_learning_loop
 from .mobile_game_learner import run_learning_cycle
+from .runtime_app import (
+    capture_runtime,
+    click_runtime,
+    connect_runtime,
+    focus_runtime,
+    inspect_runtime,
+    learner_runtime,
+    render_runtime_result,
+    send_key_runtime,
+    workflow_runtime,
+)
 from .screen_analysis import analyze_screen
 from .shortcuts import build_shortcut_summary
 from .workflow_runner import WorkflowError, run_workflow
@@ -34,6 +45,82 @@ def build_parser() -> argparse.ArgumentParser:
     classify.add_argument("--package")
     classify.add_argument("--use-ocr", action="store_true")
     classify.add_argument("--json", action="store_true")
+
+    run = subparsers.add_parser("run", help="Main runtime entrypoint for BlueStacks + desktop control.")
+    run_subparsers = run.add_subparsers(dest="run_command", required=True)
+
+    def add_runtime_common(subparser: argparse.ArgumentParser, *, include_profile: bool = False) -> None:
+        subparser.add_argument("--mode", choices=["adb", "desktop", "hybrid"], default="hybrid")
+        subparser.add_argument("--window-handle", type=int)
+        subparser.add_argument("--window-title-contains")
+        subparser.add_argument("--expected-client-width", type=int)
+        subparser.add_argument("--expected-client-height", type=int)
+        subparser.add_argument("--desktop-fullscreen-fallback", dest="desktop_fullscreen_fallback", action="store_true")
+        subparser.add_argument("--no-desktop-fullscreen-fallback", dest="desktop_fullscreen_fallback", action="store_false")
+        subparser.set_defaults(desktop_fullscreen_fallback=None)
+        subparser.add_argument("--device")
+        subparser.add_argument("--adb-path")
+        subparser.add_argument("--json", action="store_true")
+        if include_profile:
+            subparser.add_argument("--profile", default="generic")
+
+    run_connect = run_subparsers.add_parser("connect", help="Connect to BlueStacks ADB endpoint.")
+    run_connect.add_argument("--device")
+    run_connect.add_argument("--adb-path")
+    run_connect.add_argument("--json", action="store_true")
+
+    run_inspect = run_subparsers.add_parser("inspect", help="Happy-path inspect flow: detect/focus/connect/capture/classify/suggest.")
+    add_runtime_common(run_inspect, include_profile=True)
+    run_inspect.add_argument("--use-ocr", action="store_true")
+    run_inspect.add_argument("--capture-screenshot", action="store_true")
+    run_inspect.add_argument("--connect-adb", dest="connect_adb", action="store_true")
+    run_inspect.add_argument("--no-connect-adb", dest="connect_adb", action="store_false")
+    run_inspect.set_defaults(connect_adb=True)
+    run_inspect.add_argument("--focus", dest="focus_window", action="store_true")
+    run_inspect.add_argument("--no-focus", dest="focus_window", action="store_false")
+    run_inspect.set_defaults(focus_window=True)
+
+    run_capture = run_subparsers.add_parser("capture", help="Capture current state through selected runtime mode.")
+    add_runtime_common(run_capture)
+    run_capture.add_argument("--output", dest="output_path")
+    run_capture.add_argument("--use-ocr", action="store_true")
+    run_capture.add_argument("--connect-adb", action="store_true")
+
+    run_learner = run_subparsers.add_parser("learner", help="Run learner through runtime command flow.")
+    add_runtime_common(run_learner, include_profile=True)
+    run_learner.add_argument("--use-ocr", action="store_true")
+    run_learner.add_argument("--capture-screenshot", action="store_true")
+    run_learner.add_argument("--connect-adb", dest="connect_adb", action="store_true")
+    run_learner.add_argument("--no-connect-adb", dest="connect_adb", action="store_false")
+    run_learner.set_defaults(connect_adb=True)
+    run_learner.add_argument("--execute-safe-actions", action="store_true")
+
+    run_workflow = run_subparsers.add_parser("workflow", help="Run workflow through runtime command flow.")
+    add_runtime_common(run_workflow)
+    run_workflow.add_argument("workflow_name")
+    run_workflow.add_argument("--var", action="append", default=[], help="Workflow variable override in KEY=VALUE form.")
+    run_workflow.add_argument("--connect-adb", dest="connect_adb", action="store_true")
+    run_workflow.add_argument("--no-connect-adb", dest="connect_adb", action="store_false")
+    run_workflow.set_defaults(connect_adb=True)
+    run_workflow.add_argument("--dry-run", action="store_true")
+    run_workflow.add_argument("--approve-sensitive", action="store_true")
+    run_workflow.add_argument("--approve-all-boundaries", action="store_true")
+
+    run_focus = run_subparsers.add_parser("focus", help="Focus BlueStacks window.")
+    add_runtime_common(run_focus)
+
+    run_send_key = run_subparsers.add_parser("send-key", help="Send key input to BlueStacks window.")
+    add_runtime_common(run_send_key)
+    run_send_key.add_argument("--key", required=True)
+    run_send_key.add_argument("--repeat-count", type=int, default=1)
+    run_send_key.add_argument("--delay-ms", type=int, default=120)
+
+    run_click = run_subparsers.add_parser("click", help="Click BlueStacks client-relative coordinates.")
+    add_runtime_common(run_click)
+    run_click.add_argument("--x", type=int, required=True)
+    run_click.add_argument("--y", type=int, required=True)
+    run_click.add_argument("--repeat-count", type=int, default=1)
+    run_click.add_argument("--delay-ms", type=int, default=120)
 
     workflow = subparsers.add_parser("workflow", help="Run an explicit Phase 2 workflow.")
     workflow_subparsers = workflow.add_subparsers(dest="workflow_command", required=True)
@@ -187,6 +274,98 @@ def main(argv: list[str] | None = None) -> int:
             if result.visible_text:
                 preview = ", ".join(result.visible_text[:10])
                 print(f"Visible text: {preview}")
+        return 0
+
+    if args.command == "run":
+        try:
+            if args.run_command == "connect":
+                payload = connect_runtime(device=args.device, adb_path=args.adb_path)
+            else:
+                desktop_target, desktop_options = resolve_desktop_configuration(args)
+                if args.run_command == "inspect":
+                    payload = inspect_runtime(
+                        mode=args.mode,
+                        profile=args.profile,
+                        use_ocr=args.use_ocr,
+                        capture_screenshot=args.capture_screenshot,
+                        connect_adb=args.connect_adb,
+                        focus_window=args.focus_window,
+                        device=args.device,
+                        adb_path=args.adb_path,
+                        desktop_target=desktop_target,
+                        desktop_options=desktop_options,
+                    )
+                elif args.run_command == "capture":
+                    payload = capture_runtime(
+                        mode=args.mode,
+                        output_path=args.output_path,
+                        use_ocr=args.use_ocr,
+                        connect_adb=args.connect_adb,
+                        device=args.device,
+                        adb_path=args.adb_path,
+                        desktop_target=desktop_target,
+                        desktop_options=desktop_options,
+                    )
+                elif args.run_command == "learner":
+                    payload = learner_runtime(
+                        mode=args.mode,
+                        profile=args.profile,
+                        use_ocr=args.use_ocr,
+                        capture_screenshot=args.capture_screenshot,
+                        connect_adb=args.connect_adb,
+                        device=args.device,
+                        adb_path=args.adb_path,
+                        execute_safe_actions=args.execute_safe_actions,
+                        desktop_target=desktop_target,
+                        desktop_options=desktop_options,
+                    )
+                elif args.run_command == "workflow":
+                    payload = workflow_runtime(
+                        mode=args.mode,
+                        workflow_name=args.workflow_name,
+                        vars_items=args.var,
+                        connect_adb=args.connect_adb,
+                        device=args.device,
+                        adb_path=args.adb_path,
+                        dry_run=args.dry_run,
+                        approve_sensitive=args.approve_sensitive,
+                        approve_all_boundaries=args.approve_all_boundaries,
+                        desktop_target=desktop_target,
+                        desktop_options=desktop_options,
+                    )
+                elif args.run_command == "focus":
+                    payload = focus_runtime(
+                        desktop_target=desktop_target,
+                        desktop_options=desktop_options,
+                    )
+                elif args.run_command == "send-key":
+                    payload = send_key_runtime(
+                        key=args.key,
+                        repeat_count=args.repeat_count,
+                        delay_ms=args.delay_ms,
+                        desktop_target=desktop_target,
+                        desktop_options=desktop_options,
+                    )
+                elif args.run_command == "click":
+                    payload = click_runtime(
+                        x=args.x,
+                        y=args.y,
+                        repeat_count=args.repeat_count,
+                        delay_ms=args.delay_ms,
+                        desktop_target=desktop_target,
+                        desktop_options=desktop_options,
+                    )
+                else:
+                    parser.error(f"Unsupported run command: {args.run_command}")
+                    return 1
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+
+        if args.json:
+            print(json.dumps(payload, indent=2))
+        else:
+            print(render_runtime_result(payload))
         return 0
 
     if args.command == "workflow" and args.workflow_command == "run":
