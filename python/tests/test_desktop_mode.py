@@ -7,7 +7,13 @@ from blueclaw_companion.action_policy import ActionSuggestion
 from blueclaw_companion.execution_mode import DesktopOptions, DesktopTarget
 from blueclaw_companion.mobile_game_learner import execute_action, run_learning_cycle
 from blueclaw_companion.screen_analysis import analyze_screen
-from blueclaw_companion.window_control import WindowMetadata, click_bluestacks_relative, validate_window_geometry
+from blueclaw_companion.window_control import (
+    _matches_bluestacks_hints,
+    WindowMetadata,
+    capture_bluestacks_window,
+    click_bluestacks_relative,
+    validate_window_geometry,
+)
 
 
 LOGIN_XML = """<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
@@ -157,6 +163,54 @@ class DesktopModeTests(unittest.TestCase):
                 window,
                 DesktopOptions(expected_client_width=1280, expected_client_height=720),
             )
+
+    def test_capture_rejects_missing_explicit_window_handle(self) -> None:
+        with patch("blueclaw_companion.window_control.detect_bluestacks_window", return_value=None):
+            with patch("blueclaw_companion.window_control._run_json_script") as run_script:
+                with self.assertRaises(RuntimeError):
+                    capture_bluestacks_window(
+                        self.temp_root / "capture.png",
+                        target=DesktopTarget(window_handle=999999),
+                    )
+        run_script.assert_not_called()
+
+    def test_auto_detect_ignores_browser_tabs_with_bluestacks_title(self) -> None:
+        browser_window = WindowMetadata(
+            handle=1,
+            process_id=100,
+            process_name="chrome",
+            title="Now.gg/BlueStacks - BlueStacks AI Improvements - Google Chrome",
+            window_left=0,
+            window_top=0,
+            window_width=420,
+            window_height=840,
+            client_left=10,
+            client_top=20,
+            client_width=400,
+            client_height=800,
+            is_minimized=False,
+            is_foreground=True,
+        )
+        self.assertFalse(_matches_bluestacks_hints(browser_window))
+
+    def test_auto_detect_ignores_bluestacks_manager_windows(self) -> None:
+        manager_window = WindowMetadata(
+            handle=2,
+            process_id=101,
+            process_name="HD-MultiInstanceManager",
+            title="BlueStacks Multi Instance Manager",
+            window_left=0,
+            window_top=0,
+            window_width=420,
+            window_height=840,
+            client_left=10,
+            client_top=20,
+            client_width=400,
+            client_height=800,
+            is_minimized=False,
+            is_foreground=True,
+        )
+        self.assertFalse(_matches_bluestacks_hints(manager_window))
 
 
 if __name__ == "__main__":

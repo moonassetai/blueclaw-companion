@@ -34,6 +34,13 @@ DEFAULT_MEMORY_PATH = ARTIFACTS_DIR / "workflow-memory.jsonl"
 DEFAULT_GAME_MEMORY_DIR = ARTIFACTS_DIR / "games"
 
 
+def _error_text(message: str) -> str:
+    text = message.strip()
+    if not text:
+        return "Unknown error."
+    return text.splitlines()[0].strip() or "Unknown error."
+
+
 @dataclass(frozen=True)
 class ActionExecutionResult:
     executed: bool
@@ -101,6 +108,7 @@ def capture_current_screen(
     resolved_target = desktop_target or resolve_desktop_target()
     resolved_options = desktop_options or resolve_desktop_options()
     resolved_use_ocr = perception_plan.ocr_backend != "none"
+    should_capture_screenshot = bool(capture_screenshot or resolved_use_ocr or resolved_mode == ExecutionMode.ADB)
 
     if perception_plan.capture_backend == "desktop_capture" and resolved_mode == ExecutionMode.DESKTOP:
         result = capture_desktop_state(
@@ -118,17 +126,22 @@ def capture_current_screen(
         run_powershell_script("connect-bluestacks.ps1", {}, context)
 
     params: dict[str, object] = {"UiDumpPath": ui_dump_path}
-    if capture_screenshot or use_ocr:
+    if should_capture_screenshot:
         params["ScreenshotPath"] = screenshot_path
+    params["AllowUiDumpFailure"] = True
+    params["UiDumpRetries"] = 2
 
     app_result = run_powershell_script("capture-all.ps1", params, context)
     package_name = parse_running_app(app_result.stdout)
 
+    resolved_ui_dump_path = str(ui_dump_path) if ui_dump_path.exists() else None
+    resolved_screenshot_path = str(screenshot_path) if should_capture_screenshot and screenshot_path.exists() else None
+
     return analyze_screen(
-        screenshot_path=str(screenshot_path) if capture_screenshot or resolved_use_ocr else None,
-        ui_dump_path=str(ui_dump_path),
+        screenshot_path=resolved_screenshot_path,
+        ui_dump_path=resolved_ui_dump_path,
         package_name=package_name,
-        use_ocr=resolved_use_ocr,
+        use_ocr=resolved_use_ocr or (resolved_ui_dump_path is None and resolved_screenshot_path is not None),
     )
 
 
@@ -396,60 +409,81 @@ def run_learning_cycle(
 
     execution = ActionExecutionResult(executed=False, outcome="skipped", reason="Autonomous execution was not requested.")
     post_action_state: GameStateResult | None = None
+    post_action_capture_error: str | None = None
     final_decision = decision
     if execute_safe_actions and decision.should_continue:
-        execution = execute_action(
-            action=action,
-            analysis=analysis,
-            control_mode=control_mode,
-            desktop_target=resolved_target,
-            desktop_options=resolved_options,
-        )
-        if execution.executed and capture:
-            post_analysis = capture_current_screen(
-                connect=False,
-                artifacts_dir=ARTIFACTS_DIR,
-                capture_screenshot=capture_screenshot,
-                use_ocr=use_ocr,
+        try:
+            execution = execute_action(
+                action=action,
+                analysis=analysis,
                 control_mode=control_mode,
-                package_name_hint=package_hint,
                 desktop_target=resolved_target,
                 desktop_options=resolved_options,
             )
-            post_action_state = classify_game_state(
-                analysis=post_analysis,
-                state_hints=_merge_state_hints(profile, game_memory),
-                ui_text=ui_text,
+        except Exception as exc:  # noqa: BLE001
+            execution = ActionExecutionResult(
+                executed=False,
+                outcome="failed",
+                reason=f"Action execution failed: {_error_text(str(exc))}",
             )
-            if post_action_state.state == state.state:
-                final_decision = ContinuationDecision(
-                    should_continue=False,
-                    decision="stop",
-                    reason="The action did not move the learner out of the current state.",
-                    stop_reason="no_progress_detected",
-                    continue_reason=action.continue_reason or "no_progress_detected",
+
+        if capture:
+            try:
+                post_analysis = capture_current_screen(
+                    connect=False,
+                    artifacts_dir=ARTIFACTS_DIR,
+                    capture_screenshot=capture_screenshot,
+                    use_ocr=use_ocr,
+                    control_mode=control_mode,
+                    package_name_hint=package_hint,
+                    desktop_target=resolved_target,
+                    desktop_options=resolved_options,
                 )
-            elif evaluate_continuation(
-                state=post_action_state,
-                action_confidence=action.confidence,
-                action_safe_to_apply=action.safe_to_apply,
-                action_risk_level=action.risk_level,
-                visible_text=post_action_state.visible_text,
-                genre_profile=genre_profile,
-                game_memory=game_memory,
-                stagnation_status=None,
-                policy=resolved_policy,
-                unknown_streak=0,
-                low_confidence_streak=0,
-                cycle_index=current_index,
-            ).stop_reason == "security_boundary_detected":
-                final_decision = ContinuationDecision(
-                    should_continue=False,
-                    decision="stop",
-                    reason="Post-action screen crossed a security boundary.",
-                    stop_reason="security_boundary_detected",
-                    continue_reason=action.continue_reason or "security_boundary_detected",
+                post_action_state = classify_game_state(
+                    analysis=post_analysis,
+                    state_hints=_merge_state_hints(profile, game_memory),
+                    ui_text=ui_text,
                 )
+            except Exception as exc:  # noqa: BLE001
+                post_action_capture_error = _error_text(str(exc))
+
+        if post_action_capture_error:
+            final_decision = ContinuationDecision(
+                should_continue=False,
+                decision="stop",
+                reason=f"Post-action capture failed: {post_action_capture_error}",
+                stop_reason="post_action_capture_failed",
+                continue_reason=action.continue_reason or "post_action_capture_failed",
+            )
+        elif post_action_state and post_action_state.state == state.state:
+            final_decision = ContinuationDecision(
+                should_continue=False,
+                decision="stop",
+                reason="The action did not move the learner out of the current state.",
+                stop_reason="no_progress_detected",
+                continue_reason=action.continue_reason or "no_progress_detected",
+            )
+        elif post_action_state and evaluate_continuation(
+            state=post_action_state,
+            action_confidence=action.confidence,
+            action_safe_to_apply=action.safe_to_apply,
+            action_risk_level=action.risk_level,
+            visible_text=post_action_state.visible_text,
+            genre_profile=genre_profile,
+            game_memory=game_memory,
+            stagnation_status=None,
+            policy=resolved_policy,
+            unknown_streak=0,
+            low_confidence_streak=0,
+            cycle_index=current_index,
+        ).stop_reason == "security_boundary_detected":
+            final_decision = ContinuationDecision(
+                should_continue=False,
+                decision="stop",
+                reason="Post-action screen crossed a security boundary.",
+                stop_reason="security_boundary_detected",
+                continue_reason=action.continue_reason or "security_boundary_detected",
+            )
 
     timestamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     artifact_paths = {
@@ -463,7 +497,9 @@ def run_learning_cycle(
     }
     action_outcome = "skipped"
     next_state = post_action_state.state if post_action_state else None
-    if execution.executed:
+    if post_action_capture_error:
+        action_outcome = "failed"
+    elif execution.executed:
         action_outcome = "success" if next_state and next_state != state.state else "failed"
     elif execution.outcome == "failed":
         action_outcome = "failed"

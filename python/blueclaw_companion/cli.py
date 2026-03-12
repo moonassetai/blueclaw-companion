@@ -210,6 +210,10 @@ def build_parser() -> argparse.ArgumentParser:
     shortcuts_status.add_argument("--use-ocr", action="store_true")
     shortcuts_status.add_argument("--prefer-scrcpy", action="store_true")
     shortcuts_status.add_argument("--prefer-vision-model", action="store_true")
+    shortcuts_status.add_argument("--window-handle", type=int)
+    shortcuts_status.add_argument("--window-title-contains")
+    shortcuts_status.add_argument("--adb-path")
+    shortcuts_status.add_argument("--device")
     shortcuts_status.add_argument("--json", action="store_true")
 
     return parser
@@ -474,22 +478,30 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "shortcuts" and args.shortcuts_command == "status":
+        desktop_target, _desktop_options = resolve_desktop_configuration(args)
         summary = build_shortcut_summary(
             execution_mode=args.mode,
             use_ocr=args.use_ocr,
             prefer_scrcpy=args.prefer_scrcpy,
             prefer_vision_model=args.prefer_vision_model,
+            adb_path=args.adb_path,
+            device=args.device,
+            desktop_target=desktop_target,
         )
         if args.json:
             print(json.dumps(summary, indent=2))
         else:
-            perception = summary["perception"]
-            control = summary["control"]
-            print(f"Perception capture backend: {perception['capture_backend']}")
-            print(f"Perception OCR backend: {perception['ocr_backend']}")
-            print(f"Perception vision backend: {perception['vision_backend']}")
-            print(f"Control backend: {control['control_backend']}")
-            print(f"scrcpy available: {control['scrcpy_available']}")
+            checks = summary["runtime_checks"]
+            print(f"ADB binary found: {checks['adb_binary_found']}")
+            print(f"ADB device reachable: {checks['adb_device_reachable']}")
+            print(f"BlueStacks window found: {checks['bluestacks_window_found']}")
+            if checks.get("bluestacks_window_handle"):
+                print(f"BlueStacks HWND: {checks['bluestacks_window_handle']}")
+            print(f"OCR backend ready: {checks['ocr_backend_ready']}")
+            print("Backend readiness:")
+            for capability in summary["capabilities"]:
+                readiness = str(capability["readiness"]).upper()
+                print(f"- {capability['name']}: {readiness} ({capability['status']})")
         return 0
 
     parser.print_help()

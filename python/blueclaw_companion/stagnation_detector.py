@@ -28,6 +28,13 @@ class StagnationStatus:
         return asdict(self)
 
 
+def _has_two_state_oscillation(history: list[CycleSnapshot]) -> bool:
+    if len(history) < 4:
+        return False
+    tail_states = [entry.state for entry in history[-4:]]
+    return tail_states[0] == tail_states[2] and tail_states[1] == tail_states[3] and tail_states[0] != tail_states[1]
+
+
 def evaluate_stagnation(
     history: list[CycleSnapshot],
     *,
@@ -78,6 +85,8 @@ def evaluate_stagnation(
         triggered_reason = "repeated_state_loop"
     elif repeated_action_count >= max_repeated_action_count:
         triggered_reason = "repeated_action_loop"
+    elif _has_two_state_oscillation(history):
+        triggered_reason = "oscillation_loop"
     elif no_progress_streak >= max_no_progress_cycles:
         triggered_reason = "no_progress_detected"
     elif low_confidence_streak >= low_confidence_streak_limit:

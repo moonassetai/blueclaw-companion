@@ -218,10 +218,18 @@ def _pick_best_window(windows: list[WindowMetadata]) -> WindowMetadata | None:
 
 def _matches_bluestacks_hints(window: WindowMetadata) -> bool:
     process_hints = {"hd-player", "bluestacks", "bluestacksappplayer", "bluestacks_nxt"}
+    browser_processes = {"chrome", "msedge", "firefox", "iexplore", "brave"}
     title_hints = ("bluestacks", "app player")
+    excluded_title_hints = ("multi instance manager", "settings", "macro manager")
     process_name = window.process_name.lower()
     title = window.title.lower()
-    return process_name in process_hints or any(hint in title for hint in title_hints)
+    if process_name in process_hints:
+        return True
+    if process_name in browser_processes:
+        return False
+    if any(hint in title for hint in excluded_title_hints):
+        return False
+    return any(hint in title for hint in title_hints)
 
 
 def detect_bluestacks_window(target: DesktopTarget | None = None) -> WindowMetadata | None:
@@ -239,6 +247,24 @@ def detect_bluestacks_window(target: DesktopTarget | None = None) -> WindowMetad
 
     candidates = [window for window in windows if _matches_bluestacks_hints(window)]
     return _pick_best_window(candidates)
+
+
+def require_bluestacks_window(
+    *,
+    target: DesktopTarget | None = None,
+    purpose: str = "this action",
+) -> WindowMetadata:
+    resolved_target = target or resolve_desktop_target()
+    window = detect_bluestacks_window(target=resolved_target)
+    if window:
+        return window
+    if resolved_target.window_handle is not None:
+        raise RuntimeError(f"BlueStacks window handle {resolved_target.window_handle} was not found for {purpose}.")
+    if resolved_target.window_title_contains:
+        raise RuntimeError(
+            f'No BlueStacks window matching title "{resolved_target.window_title_contains}" was found for {purpose}.'
+        )
+    raise RuntimeError("No BlueStacks window with a visible main handle was found.")
 
 
 def get_window_geometry(window: WindowMetadata) -> dict[str, int]:
@@ -277,9 +303,7 @@ def focus_bluestacks_window(
     resolved_target = target or resolve_desktop_target()
     resolved_options = options or resolve_desktop_options()
 
-    window = detect_bluestacks_window(target=resolved_target)
-    if not window:
-        raise RuntimeError("No BlueStacks window with a visible main handle was found.")
+    window = require_bluestacks_window(target=resolved_target, purpose="focus")
 
     hwnd = wintypes.HWND(window.handle)
     if window.is_minimized:
@@ -460,6 +484,10 @@ def capture_bluestacks_window(
 ) -> WindowCapture:
     resolved_target = target or resolve_desktop_target()
     resolved_options = options or resolve_desktop_options()
+    validate_window_geometry(
+        require_bluestacks_window(target=resolved_target, purpose="capture"),
+        resolved_options,
+    )
     fallback = (
         bool(full_screen_fallback)
         if full_screen_fallback is not None

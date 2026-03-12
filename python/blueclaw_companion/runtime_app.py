@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import subprocess
 import time
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 from .desktop_state import capture_desktop_state
 from .execution_mode import DesktopOptions, DesktopTarget, ExecutionMode
@@ -21,6 +21,7 @@ from .workflow_runner import ROOT_DIR, WorkflowError, run_workflow
 
 
 SCRIPTS_DIR = ROOT_DIR / "scripts"
+T = TypeVar("T")
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,21 @@ def _short_error(message: str) -> str:
 
 def _window_payload(window: WindowMetadata | None) -> dict[str, object] | None:
     return window.to_dict() if window else None
+
+
+def _pin_desktop_target(desktop_target: DesktopTarget) -> tuple[DesktopTarget, WindowMetadata | None]:
+    window = detect_bluestacks_window(target=desktop_target)
+    if not window:
+        return desktop_target, None
+    if desktop_target.window_handle == window.handle:
+        return desktop_target, window
+    return (
+        DesktopTarget(
+            window_handle=window.handle,
+            window_title_contains=desktop_target.window_title_contains,
+        ),
+        window,
+    )
 
 
 def _run_script(script_name: str, params: dict[str, Any] | None = None) -> subprocess.CompletedProcess[str]:
@@ -91,6 +107,54 @@ def resolve_effective_mode(
     return selected_mode
 
 
+def _run_with_mode_fallback(
+    *,
+    selected_mode: ExecutionMode,
+    desktop_available: bool,
+    connect_adb: bool,
+    command_label: str,
+    run_desktop: Callable[[], T],
+    run_adb: Callable[[], T],
+    connect_adb_fn: Callable[[], tuple[bool, str]],
+) -> tuple[T, ExecutionMode, bool, str, dict[str, str] | None]:
+    adb_connected = False
+    adb_message = "not_attempted"
+    fallback: dict[str, str] | None = None
+
+    if selected_mode == ExecutionMode.DESKTOP:
+        try:
+            return run_desktop(), ExecutionMode.DESKTOP, adb_connected, adb_message, fallback
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"{command_label} failed: {_short_error(str(exc))}") from exc
+
+    if selected_mode == ExecutionMode.ADB:
+        if connect_adb:
+            adb_connected, adb_message = connect_adb_fn()
+        try:
+            return run_adb(), ExecutionMode.ADB, adb_connected, adb_message, fallback
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"{command_label} failed: {_short_error(str(exc))}") from exc
+
+    if desktop_available:
+        try:
+            return run_desktop(), ExecutionMode.DESKTOP, adb_connected, adb_message, fallback
+        except Exception as desktop_exc:  # noqa: BLE001
+            fallback = {"desktop_error": _short_error(str(desktop_exc))}
+    else:
+        fallback = {"desktop_error": "BlueStacks desktop window was not found."}
+
+    if connect_adb:
+        adb_connected, adb_message = connect_adb_fn()
+    try:
+        return run_adb(), ExecutionMode.ADB, adb_connected, adb_message, fallback
+    except Exception as adb_exc:  # noqa: BLE001
+        desktop_error = (fallback or {}).get("desktop_error", "Desktop execution path failed.")
+        adb_error = _short_error(str(adb_exc))
+        raise RuntimeError(
+            f"{command_label} failed in hybrid mode. Desktop error: {desktop_error}. ADB error: {adb_error}."
+        ) from adb_exc
+
+
 def inspect_runtime(
     *,
     mode: str,
@@ -105,44 +169,59 @@ def inspect_runtime(
     desktop_options: DesktopOptions,
 ) -> dict[str, object]:
     selected_mode = ExecutionMode.from_value(mode)
-    window = detect_bluestacks_window(target=desktop_target)
+    runtime_target, window = _pin_desktop_target(desktop_target)
     bluestacks_found = window is not None
 
     focused_window = window
     focus_error = ""
-    if focus_window and selected_mode in {ExecutionMode.DESKTOP, ExecutionMode.HYBRID}:
-        try:
-            focused_window = focus_bluestacks_window(target=desktop_target, options=desktop_options)
-            bluestacks_found = True
-        except Exception as exc:  # noqa: BLE001
-            focus_error = _short_error(str(exc))
 
-    adb_connected = False
-    adb_message = "not_attempted"
-    if connect_adb and selected_mode in {ExecutionMode.ADB, ExecutionMode.HYBRID}:
-        adb_connected, adb_message = try_connect_adb(device=device, adb_path=adb_path)
-
-    effective_mode = resolve_effective_mode(selected_mode, bluestacks_found=bluestacks_found)
-
-    try:
-        learner_result = run_learning_cycle(
+    def _run_desktop() -> Any:
+        nonlocal focused_window, bluestacks_found, focus_error
+        if focus_window:
+            try:
+                focused_window = focus_bluestacks_window(target=runtime_target, options=desktop_options)
+                bluestacks_found = True
+            except Exception as exc:  # noqa: BLE001
+                focus_error = _short_error(str(exc))
+        return run_learning_cycle(
             profile_id=profile,
             capture=True,
             connect=False,
             capture_screenshot=capture_screenshot,
             use_ocr=use_ocr,
-            control_mode=effective_mode.value,
-            desktop_target=desktop_target,
+            control_mode=ExecutionMode.DESKTOP.value,
+            desktop_target=runtime_target,
             desktop_options=desktop_options,
             execute_safe_actions=False,
         )
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(f"Inspect failed: {_short_error(str(exc))}") from exc
+
+    def _run_adb() -> Any:
+        return run_learning_cycle(
+            profile_id=profile,
+            capture=True,
+            connect=False,
+            capture_screenshot=capture_screenshot,
+            use_ocr=use_ocr,
+            control_mode=ExecutionMode.ADB.value,
+            desktop_target=runtime_target,
+            desktop_options=desktop_options,
+            execute_safe_actions=False,
+        )
+
+    learner_result, effective_mode, adb_connected, adb_message, fallback_detail = _run_with_mode_fallback(
+        selected_mode=selected_mode,
+        desktop_available=bluestacks_found,
+        connect_adb=connect_adb,
+        command_label="Inspect",
+        run_desktop=_run_desktop,
+        run_adb=_run_adb,
+        connect_adb_fn=lambda: try_connect_adb(device=device, adb_path=adb_path),
+    )
 
     status = RuntimeStatus(
         selected_mode=selected_mode.value,
         effective_mode=effective_mode.value,
-        target=desktop_target.to_dict(),
+        target=runtime_target.to_dict(),
         bluestacks_found=bluestacks_found,
         adb_connected=adb_connected,
         adb_message=adb_message,
@@ -157,6 +236,7 @@ def inspect_runtime(
         "action": learner_result.action,
         "decision": learner_result.decision,
         "memory_path": learner_result.memory_path,
+        "fallback": fallback_detail,
     }
     return payload
 
@@ -173,46 +253,53 @@ def capture_runtime(
     desktop_options: DesktopOptions,
 ) -> dict[str, object]:
     selected_mode = ExecutionMode.from_value(mode)
-    window = detect_bluestacks_window(target=desktop_target)
-    effective_mode = resolve_effective_mode(selected_mode, bluestacks_found=window is not None)
+    runtime_target, window = _pin_desktop_target(desktop_target)
 
-    adb_connected = False
-    adb_message = "not_attempted"
-    if connect_adb and effective_mode == ExecutionMode.ADB:
-        adb_connected, adb_message = try_connect_adb(device=device, adb_path=adb_path)
+    def _run_desktop() -> dict[str, Any]:
+        screenshot = output_path or str(ROOT_DIR / "artifacts" / f"runtime-capture-{time.strftime('%Y%m%d-%H%M%S')}.png")
+        result = capture_desktop_state(
+            screenshot_path=screenshot,
+            use_ocr=use_ocr,
+            desktop_target=runtime_target,
+            desktop_options=desktop_options,
+        )
+        return {
+            "analysis": result.analysis.to_dict(),
+            "capture": result.capture.to_dict(),
+        }
 
-    try:
-        if effective_mode == ExecutionMode.DESKTOP:
-            screenshot = output_path or str(ROOT_DIR / "artifacts" / f"runtime-capture-{time.strftime('%Y%m%d-%H%M%S')}.png")
-            result = capture_desktop_state(
-                screenshot_path=screenshot,
-                use_ocr=use_ocr,
-                desktop_target=desktop_target,
-                desktop_options=desktop_options,
-            )
-            analysis = result.analysis.to_dict()
-            capture_payload = result.capture.to_dict()
-        else:
-            analysis = capture_current_screen(
-                connect=False,
-                capture_screenshot=True,
-                use_ocr=use_ocr,
-                control_mode=ExecutionMode.ADB.value,
-                desktop_target=desktop_target,
-                desktop_options=desktop_options,
-            ).to_dict()
-            capture_payload = {
+    def _run_adb() -> dict[str, Any]:
+        analysis = capture_current_screen(
+            connect=False,
+            capture_screenshot=True,
+            use_ocr=use_ocr,
+            control_mode=ExecutionMode.ADB.value,
+            desktop_target=runtime_target,
+            desktop_options=desktop_options,
+        ).to_dict()
+        return {
+            "analysis": analysis,
+            "capture": {
                 "output_path": analysis.get("screenshot_path"),
                 "capture_mode": "adb_screenshot",
                 "window": None,
-            }
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(f"Capture failed: {_short_error(str(exc))}") from exc
+            },
+        }
+
+    runtime_result, effective_mode, adb_connected, adb_message, fallback_detail = _run_with_mode_fallback(
+        selected_mode=selected_mode,
+        desktop_available=window is not None,
+        connect_adb=connect_adb,
+        command_label="Capture",
+        run_desktop=_run_desktop,
+        run_adb=_run_adb,
+        connect_adb_fn=lambda: try_connect_adb(device=device, adb_path=adb_path),
+    )
 
     status = RuntimeStatus(
         selected_mode=selected_mode.value,
         effective_mode=effective_mode.value,
-        target=desktop_target.to_dict(),
+        target=runtime_target.to_dict(),
         bluestacks_found=window is not None,
         adb_connected=adb_connected,
         adb_message=adb_message,
@@ -220,18 +307,21 @@ def capture_runtime(
     return {
         "command": "capture",
         "status": status.to_dict(),
-        "capture": capture_payload,
-        "analysis": analysis,
+        "capture": runtime_result["capture"],
+        "analysis": runtime_result["analysis"],
+        "fallback": fallback_detail,
     }
 
 
 def focus_runtime(*, desktop_target: DesktopTarget, desktop_options: DesktopOptions) -> dict[str, object]:
+    runtime_target, _window = _pin_desktop_target(desktop_target)
     try:
-        window = focus_bluestacks_window(target=desktop_target, options=desktop_options)
+        window = focus_bluestacks_window(target=runtime_target, options=desktop_options)
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(f"Focus failed: {_short_error(str(exc))}") from exc
     return {
         "command": "focus",
+        "target": runtime_target.to_dict(),
         "window": window.to_dict(),
     }
 
@@ -244,18 +334,20 @@ def send_key_runtime(
     desktop_target: DesktopTarget,
     desktop_options: DesktopOptions,
 ) -> dict[str, object]:
+    runtime_target, _window = _pin_desktop_target(desktop_target)
     try:
         payload = send_bluestacks_key(
             key,
             repeat_count=repeat_count,
             delay_ms=delay_ms,
-            target=desktop_target,
+            target=runtime_target,
             options=desktop_options,
         )
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(f"Send-key failed: {_short_error(str(exc))}") from exc
     return {
         "command": "send-key",
+        "target": runtime_target.to_dict(),
         "result": payload,
     }
 
@@ -269,19 +361,21 @@ def click_runtime(
     desktop_target: DesktopTarget,
     desktop_options: DesktopOptions,
 ) -> dict[str, object]:
+    runtime_target, _window = _pin_desktop_target(desktop_target)
     try:
         payload = click_bluestacks_relative(
             x,
             y,
             repeat_count=repeat_count,
             delay_ms=delay_ms,
-            target=desktop_target,
+            target=runtime_target,
             options=desktop_options,
         )
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(f"Click failed: {_short_error(str(exc))}") from exc
     return {
         "command": "click",
+        "target": runtime_target.to_dict(),
         "result": payload,
     }
 
@@ -309,33 +403,41 @@ def learner_runtime(
     desktop_options: DesktopOptions,
 ) -> dict[str, object]:
     selected_mode = ExecutionMode.from_value(mode)
-    window = detect_bluestacks_window(target=desktop_target)
-    effective_mode = resolve_effective_mode(selected_mode, bluestacks_found=window is not None)
-
-    adb_connected = False
-    adb_message = "not_attempted"
-    if connect_adb and effective_mode == ExecutionMode.ADB:
-        adb_connected, adb_message = try_connect_adb(device=device, adb_path=adb_path)
-
-    try:
-        result = run_learning_cycle(
+    runtime_target, window = _pin_desktop_target(desktop_target)
+    result, effective_mode, adb_connected, adb_message, fallback_detail = _run_with_mode_fallback(
+        selected_mode=selected_mode,
+        desktop_available=window is not None,
+        connect_adb=connect_adb,
+        command_label="Learner",
+        run_desktop=lambda: run_learning_cycle(
             profile_id=profile,
             capture=True,
             connect=False,
             capture_screenshot=capture_screenshot,
             use_ocr=use_ocr,
-            control_mode=effective_mode.value,
-            desktop_target=desktop_target,
+            control_mode=ExecutionMode.DESKTOP.value,
+            desktop_target=runtime_target,
             desktop_options=desktop_options,
             execute_safe_actions=execute_safe_actions,
-        )
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(f"Learner failed: {_short_error(str(exc))}") from exc
+        ),
+        run_adb=lambda: run_learning_cycle(
+            profile_id=profile,
+            capture=True,
+            connect=False,
+            capture_screenshot=capture_screenshot,
+            use_ocr=use_ocr,
+            control_mode=ExecutionMode.ADB.value,
+            desktop_target=runtime_target,
+            desktop_options=desktop_options,
+            execute_safe_actions=execute_safe_actions,
+        ),
+        connect_adb_fn=lambda: try_connect_adb(device=device, adb_path=adb_path),
+    )
 
     status = RuntimeStatus(
         selected_mode=selected_mode.value,
         effective_mode=effective_mode.value,
-        target=desktop_target.to_dict(),
+        target=runtime_target.to_dict(),
         bluestacks_found=window is not None,
         adb_connected=adb_connected,
         adb_message=adb_message,
@@ -344,6 +446,7 @@ def learner_runtime(
         "command": "learner",
         "status": status.to_dict(),
         "result": result.to_dict(),
+        "fallback": fallback_detail,
     }
 
 
@@ -362,13 +465,7 @@ def workflow_runtime(
     desktop_options: DesktopOptions,
 ) -> dict[str, object]:
     selected_mode = ExecutionMode.from_value(mode)
-    window = detect_bluestacks_window(target=desktop_target)
-    effective_mode = resolve_effective_mode(selected_mode, bluestacks_found=window is not None)
-    adb_connected = False
-    adb_message = "not_attempted"
-
-    if connect_adb:
-        adb_connected, adb_message = try_connect_adb(device=device, adb_path=adb_path)
+    runtime_target, window = _pin_desktop_target(desktop_target)
 
     variables: dict[str, str] = {}
     for item in vars_items:
@@ -377,24 +474,35 @@ def workflow_runtime(
         key, value = item.split("=", 1)
         variables[key] = value
 
-    try:
-        result = run_workflow(
-            workflow_name=workflow_name,
-            variable_overrides=variables,
-            dry_run=dry_run,
-            approve_sensitive=approve_sensitive,
-            approve_all_boundaries=approve_all_boundaries,
-            execution_mode=effective_mode.value,
-            desktop_target=desktop_target,
-            desktop_options=desktop_options,
-        )
-    except WorkflowError as exc:
-        raise RuntimeError(f"Workflow failed: {_short_error(str(exc))}") from exc
+    def _run_workflow(execution_mode: ExecutionMode) -> Any:
+        try:
+            return run_workflow(
+                workflow_name=workflow_name,
+                variable_overrides=variables,
+                dry_run=dry_run,
+                approve_sensitive=approve_sensitive,
+                approve_all_boundaries=approve_all_boundaries,
+                execution_mode=execution_mode.value,
+                desktop_target=runtime_target,
+                desktop_options=desktop_options,
+            )
+        except WorkflowError as exc:
+            raise RuntimeError(_short_error(str(exc))) from exc
+
+    result, effective_mode, adb_connected, adb_message, fallback_detail = _run_with_mode_fallback(
+        selected_mode=selected_mode,
+        desktop_available=window is not None,
+        connect_adb=connect_adb,
+        command_label="Workflow",
+        run_desktop=lambda: _run_workflow(ExecutionMode.DESKTOP),
+        run_adb=lambda: _run_workflow(ExecutionMode.ADB),
+        connect_adb_fn=lambda: try_connect_adb(device=device, adb_path=adb_path),
+    )
 
     status = RuntimeStatus(
         selected_mode=selected_mode.value,
         effective_mode=effective_mode.value,
-        target=desktop_target.to_dict(),
+        target=runtime_target.to_dict(),
         bluestacks_found=window is not None,
         adb_connected=adb_connected,
         adb_message=adb_message,
@@ -404,6 +512,7 @@ def workflow_runtime(
         "command": "workflow",
         "status": status.to_dict(),
         "result": result.to_dict(),
+        "fallback": fallback_detail,
     }
 
 

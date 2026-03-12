@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from blueclaw_companion.game_memory_store import game_memory_path
-from blueclaw_companion.mobile_game_learner import run_learning_cycle
+from blueclaw_companion.mobile_game_learner import capture_current_screen, run_learning_cycle
 from blueclaw_companion.screen_analysis import analyze_screen
 
 
@@ -132,6 +132,69 @@ class MobileGameLearnerTests(unittest.TestCase):
 
         self.assertEqual(result.execution["executed"], True)
         self.assertEqual(result.decision["stop_reason"], "no_progress_detected")
+
+    def test_failed_action_still_triggers_post_action_recapture(self) -> None:
+        xml_path = self.write_temp_xml(LOGIN_XML)
+        analysis = analyze_screen(ui_dump_path=str(xml_path), package_name="com.example.game")
+        with patch("blueclaw_companion.mobile_game_learner.capture_current_screen", side_effect=[analysis, analysis]) as capture_current_screen:
+            with patch("blueclaw_companion.mobile_game_learner.execute_action") as execute_action:
+                execute_action.return_value = type(
+                    "ExecResult",
+                    (),
+                    {"executed": False, "outcome": "failed", "reason": "mock", "to_dict": lambda self: {"executed": False, "outcome": "failed", "reason": "mock"}},
+                )()
+                result = run_learning_cycle(
+                    profile_id="generic",
+                    package_name="com.example.game",
+                    memory_path=self.memory_path,
+                    game_memory_dir=self.game_memory_dir,
+                    capture=True,
+                    execute_safe_actions=True,
+                )
+
+        self.assertEqual(capture_current_screen.call_count, 2)
+        self.assertEqual(result.decision["stop_reason"], "no_progress_detected")
+
+    def test_post_action_capture_failure_sets_explicit_stop_reason(self) -> None:
+        xml_path = self.write_temp_xml(LOGIN_XML)
+        analysis = analyze_screen(ui_dump_path=str(xml_path), package_name="com.example.game")
+        with patch("blueclaw_companion.mobile_game_learner.capture_current_screen", side_effect=[analysis, RuntimeError("capture failure")]):
+            with patch("blueclaw_companion.mobile_game_learner.execute_action") as execute_action:
+                execute_action.return_value = type(
+                    "ExecResult",
+                    (),
+                    {"executed": True, "outcome": "executed", "reason": "mock", "to_dict": lambda self: {"executed": True, "outcome": "executed", "reason": "mock"}},
+                )()
+                result = run_learning_cycle(
+                    profile_id="generic",
+                    package_name="com.example.game",
+                    memory_path=self.memory_path,
+                    game_memory_dir=self.game_memory_dir,
+                    capture=True,
+                    execute_safe_actions=True,
+                )
+
+        self.assertEqual(result.decision["stop_reason"], "post_action_capture_failed")
+
+    def test_capture_current_screen_degrades_to_screenshot_when_ui_dump_missing(self) -> None:
+        screenshot_path = self.temp_root / "screen-20250101-000000.png"
+        ui_dump_path = self.temp_root / "screen-20250101-000000.xml"
+
+        def fake_capture(_script_name: str, params: dict[str, object], _context: object) -> object:
+            Path(str(params["ScreenshotPath"])).write_bytes(b"fake")
+            return type("CaptureResult", (), {"stdout": "Foreground Package: com.example.game"})()
+
+        with patch("blueclaw_companion.mobile_game_learner.run_powershell_script", side_effect=fake_capture):
+            with patch("blueclaw_companion.mobile_game_learner.time.strftime", return_value="20250101-000000"):
+                analysis = capture_current_screen(
+                    artifacts_dir=self.temp_root,
+                    control_mode="adb",
+                    capture_screenshot=False,
+                    use_ocr=False,
+                )
+
+        self.assertEqual(Path(analysis.screenshot_path).resolve(), screenshot_path.resolve())
+        self.assertIsNone(analysis.ui_dump_path)
 
 
 if __name__ == "__main__":

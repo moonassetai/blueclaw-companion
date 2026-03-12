@@ -66,8 +66,11 @@ The `inspect` command is the default happy-path flow and performs:
 ## Quick Start
 
 ```powershell
-# One-command happy path (launcher)
-.\run.ps1 inspect --mode hybrid --connect-adb --json
+# Canonical health-check (recommended)
+python -m blueclaw_companion run inspect --mode hybrid --connect-adb --json
+
+# Same health-check via launcher shortcut
+.\run.ps1 health
 
 # Inspect/capture through desktop mode
 .\run.ps1 inspect --mode desktop --use-ocr --json
@@ -79,6 +82,28 @@ The `inspect` command is the default happy-path flow and performs:
 ```
 
 `--mode` supports `adb`, `desktop`, and `hybrid` (hybrid currently resolves to desktop when BlueStacks window is found, otherwise adb fallback).
+
+## Canonical Health-Check
+
+Use this as the main runtime verification command:
+
+```powershell
+python -m blueclaw_companion run inspect --mode hybrid --connect-adb --json
+```
+
+Launcher equivalent:
+
+```powershell
+.\run.ps1 health
+```
+
+Expected behavior:
+
+1. BlueStacks window detection with HWND pinning for runtime desktop actions
+2. Desktop-first execution in hybrid mode
+3. ADB fallback when desktop path fails
+4. If ADB UI dump is flaky, capture degrades to screenshot-first analysis instead of failing immediately
+5. Clear JSON status and fallback diagnostics
 
 ## How to Run Phase 1 (Scripts)
 
@@ -228,7 +253,16 @@ Inspect resolved shortcut plan locally:
 
 ```powershell
 $env:PYTHONPATH = "python"
-python -m blueclaw_companion shortcuts status --mode adb --use-ocr --prefer-scrcpy --prefer-vision-model --json
+python -m blueclaw_companion shortcuts status --mode adb --use-ocr --device 127.0.0.1:5555 --json
 ```
+
+`shortcuts status` now performs live readiness checks for:
+
+1. `adb` binary detection
+2. reachable ADB device (`adb devices`)
+3. BlueStacks window presence
+4. OCR backend readiness (when requested)
+
+Non-JSON output prints per-backend readiness as `GREEN/RED/YELLOW`.
 
 Reference: `references/shortcut-acceleration.md`

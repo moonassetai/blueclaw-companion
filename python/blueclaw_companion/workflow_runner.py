@@ -55,6 +55,13 @@ class WorkflowError(RuntimeError):
     pass
 
 
+def _error_text(exc: Exception) -> str:
+    message = str(exc).strip()
+    if not message:
+        return "Unknown error."
+    return message.splitlines()[0].strip() or "Unknown error."
+
+
 def load_workflow(workflow_name: str) -> dict[str, Any]:
     path = WORKFLOWS_DIR / f"{workflow_name}.json"
     if not path.exists():
@@ -94,6 +101,10 @@ def run_powershell_script(script_name: str, params: dict[str, Any], context: Wor
     ]
     for key, value in params.items():
         if value is None or value == "":
+            continue
+        if isinstance(value, bool):
+            if value:
+                command.append(f"-{key}")
             continue
         command.extend([f"-{key}", str(value)])
 
@@ -139,6 +150,7 @@ def capture_and_classify(step_id: str, step: dict[str, Any], context: WorkflowCo
     ui_dump_path = context.artifacts_dir / f"{context.workflow_name}-{step_id}-{timestamp}.xml"
 
     mode = ExecutionMode.from_value(perception_plan.execution_mode)
+    should_capture_screenshot = bool(capture_screenshot or resolved_use_ocr or mode == ExecutionMode.ADB)
     if perception_plan.capture_backend == "desktop_capture" and mode == ExecutionMode.DESKTOP:
         from .desktop_state import capture_desktop_state
 
@@ -156,20 +168,24 @@ def capture_and_classify(step_id: str, step: dict[str, Any], context: WorkflowCo
     params: dict[str, object] = {
         "UiDumpPath": str(ui_dump_path),
     }
-    if capture_screenshot or resolved_use_ocr:
+    if should_capture_screenshot:
         params["ScreenshotPath"] = str(screenshot_path)
+    params["AllowUiDumpFailure"] = True
+    params["UiDumpRetries"] = 2
 
     app_result = run_powershell_script("capture-all.ps1", params, context)
     package_name = parse_running_app(app_result.stdout)
+    resolved_ui_dump_path = str(ui_dump_path) if ui_dump_path.exists() else None
+    resolved_screenshot_path = str(screenshot_path) if should_capture_screenshot and screenshot_path.exists() else None
 
     analysis = analyze_screen(
-        screenshot_path=str(screenshot_path) if capture_screenshot or resolved_use_ocr else None,
-        ui_dump_path=str(ui_dump_path),
+        screenshot_path=resolved_screenshot_path,
+        ui_dump_path=resolved_ui_dump_path,
         package_name=package_name,
-        use_ocr=resolved_use_ocr,
+        use_ocr=resolved_use_ocr or (resolved_ui_dump_path is None and resolved_screenshot_path is not None),
     )
     context.last_analysis = analysis
-    context.last_ui_dump = load_ui_dump(ui_dump_path)
+    context.last_ui_dump = load_ui_dump(ui_dump_path) if resolved_ui_dump_path else None
     return analysis
 
 
@@ -191,6 +207,95 @@ def choose_next_step(workflow: dict[str, Any], step_id: str | None) -> str | Non
     if index + 1 >= len(steps):
         return None
     return ids[index + 1]
+
+
+def _parse_step_retry_policy(step: dict[str, Any]) -> tuple[int, int]:
+    max_retries_raw = step.get("max_retries", 0)
+    retry_delay_raw = step.get("retry_delay_ms", 0)
+    try:
+        max_retries = int(max_retries_raw)
+    except (TypeError, ValueError) as exc:
+        raise WorkflowError(f"Invalid max_retries value `{max_retries_raw}` for step `{step.get('id', 'unknown')}`.") from exc
+    try:
+        retry_delay_ms = int(retry_delay_raw)
+    except (TypeError, ValueError) as exc:
+        raise WorkflowError(
+            f"Invalid retry_delay_ms value `{retry_delay_raw}` for step `{step.get('id', 'unknown')}`."
+        ) from exc
+    return max(0, max_retries), max(0, retry_delay_ms)
+
+
+def _execute_step_action(
+    *,
+    workflow_name: str,
+    workflow: dict[str, Any],
+    step_id: str,
+    step: dict[str, Any],
+    context: WorkflowContext,
+    completed_steps: list[str],
+) -> tuple[str | None, WorkflowResult | None]:
+    action = step["action"]
+
+    if action == "script":
+        params = format_value(step.get("params", {}), context.variables)
+        run_powershell_script(step["script"], params, context)
+        completed_steps.append(step_id)
+        return choose_next_step(workflow, step_id), None
+
+    if action == "capture_and_classify":
+        capture_and_classify(step_id, step, context)
+        completed_steps.append(step_id)
+        return choose_next_step(workflow, step_id), None
+
+    if action == "branch_on_state":
+        analysis = ensure_analysis(context)
+        target_state = step["state"]
+        next_step = step["on_match"] if analysis.state == target_state else step["on_no_match"]
+        completed_steps.append(step_id)
+        return next_step, None
+
+    if action == "tap_ui_text":
+        if ExecutionMode.from_value(context.execution_mode) == ExecutionMode.DESKTOP:
+            raise WorkflowError("tap_ui_text requires an Android UI dump and is not available in desktop mode.")
+        if not context.last_ui_dump:
+            raise WorkflowError("No UI dump is available for tap_ui_text.")
+        labels = format_value(step["labels"], context.variables)
+        node = context.last_ui_dump.find_first_node(labels)
+        if not node or not node.bounds:
+            raise WorkflowError(f"Could not find a tappable node for labels: {labels}")
+        x, y = node.bounds.center
+        run_powershell_script("tap.ps1", {"X": x, "Y": y}, context)
+        completed_steps.append(step_id)
+        return choose_next_step(workflow, step_id), None
+
+    if action == "approval_required":
+        needs_sensitive_approval = bool(step.get("sensitive", True))
+        approved = context.approve_all_boundaries or (context.approve_sensitive and needs_sensitive_approval)
+        if not approved:
+            return None, WorkflowResult(
+                workflow=workflow_name,
+                status="approval_required",
+                completed_steps=completed_steps,
+                next_step=step_id,
+                message=step["message"],
+                analysis=context.last_analysis.to_dict() if context.last_analysis else None,
+                commands=context.command_log,
+            )
+        completed_steps.append(step_id)
+        return choose_next_step(workflow, step_id), None
+
+    if action == "stop":
+        return None, WorkflowResult(
+            workflow=workflow_name,
+            status="stopped",
+            completed_steps=completed_steps,
+            next_step=None,
+            message=step["message"],
+            analysis=context.last_analysis.to_dict() if context.last_analysis else None,
+            commands=context.command_log,
+        )
+
+    raise WorkflowError(f"Unsupported workflow action: {action}")
 
 
 def run_workflow(
@@ -234,71 +339,73 @@ def run_workflow(
                 analysis=context.last_analysis.to_dict() if context.last_analysis else None,
                 commands=context.command_log,
             )
-
-        if action == "script":
-            params = format_value(step.get("params", {}), context.variables)
-            run_powershell_script(step["script"], params, context)
-            completed_steps.append(next_step)
-            next_step = choose_next_step(workflow, next_step)
-            continue
-
-        if action == "capture_and_classify":
-            capture_and_classify(next_step, step, context)
-            completed_steps.append(next_step)
-            next_step = choose_next_step(workflow, next_step)
-            continue
-
-        if action == "branch_on_state":
-            analysis = ensure_analysis(context)
-            target_state = step["state"]
-            next_step = step["on_match"] if analysis.state == target_state else step["on_no_match"]
-            completed_steps.append(step["id"])
-            continue
-
-        if action == "tap_ui_text":
-            if ExecutionMode.from_value(context.execution_mode) == ExecutionMode.DESKTOP:
-                raise WorkflowError("tap_ui_text requires an Android UI dump and is not available in desktop mode.")
-            if not context.last_ui_dump:
-                raise WorkflowError("No UI dump is available for tap_ui_text.")
-            labels = format_value(step["labels"], context.variables)
-            node = context.last_ui_dump.find_first_node(labels)
-            if not node or not node.bounds:
-                raise WorkflowError(f"Could not find a tappable node for labels: {labels}")
-            x, y = node.bounds.center
-            run_powershell_script("tap.ps1", {"X": x, "Y": y}, context)
-            completed_steps.append(step["id"])
-            next_step = choose_next_step(workflow, next_step)
-            continue
-
-        if action == "approval_required":
-            needs_sensitive_approval = bool(step.get("sensitive", True))
-            approved = context.approve_all_boundaries or (context.approve_sensitive and needs_sensitive_approval)
-            if not approved:
-                return WorkflowResult(
-                    workflow=workflow_name,
-                    status="approval_required",
+        max_retries, retry_delay_ms = _parse_step_retry_policy(step)
+        on_error = step.get("on_error")
+        attempts = 0
+        while True:
+            try:
+                resolved_next_step, terminal_result = _execute_step_action(
+                    workflow_name=workflow_name,
+                    workflow=workflow,
+                    step_id=next_step,
+                    step=step,
+                    context=context,
                     completed_steps=completed_steps,
-                    next_step=next_step,
-                    message=step["message"],
-                    analysis=context.last_analysis.to_dict() if context.last_analysis else None,
-                    commands=context.command_log,
                 )
-            completed_steps.append(step["id"])
-            next_step = choose_next_step(workflow, next_step)
-            continue
+                if terminal_result:
+                    return terminal_result
+                next_step = resolved_next_step
+                break
+            except Exception as exc:  # noqa: BLE001
+                attempts += 1
+                detail = _error_text(exc)
+                if attempts <= max_retries:
+                    context.command_log.append(
+                        {
+                            "step": next_step,
+                            "action": action,
+                            "attempt": attempts,
+                            "max_retries": max_retries,
+                            "retry_delay_ms": retry_delay_ms,
+                            "status": "retrying_after_error",
+                            "error": detail,
+                        }
+                    )
+                    if retry_delay_ms > 0:
+                        time.sleep(retry_delay_ms / 1000.0)
+                    continue
 
-        if action == "stop":
-            return WorkflowResult(
-                workflow=workflow_name,
-                status="stopped",
-                completed_steps=completed_steps,
-                next_step=None,
-                message=step["message"],
-                analysis=context.last_analysis.to_dict() if context.last_analysis else None,
-                commands=context.command_log,
-            )
+                if on_error:
+                    context.command_log.append(
+                        {
+                            "step": next_step,
+                            "action": action,
+                            "attempts": attempts,
+                            "status": "error_routed",
+                            "error": detail,
+                            "on_error": on_error,
+                        }
+                    )
+                    if on_error == "stop":
+                        return WorkflowResult(
+                            workflow=workflow_name,
+                            status="stopped",
+                            completed_steps=completed_steps,
+                            next_step=None,
+                            message=f"Step `{next_step}` failed and workflow stopped via on_error. Error: {detail}",
+                            analysis=context.last_analysis.to_dict() if context.last_analysis else None,
+                            commands=context.command_log,
+                        )
+                    if on_error not in step_lookup:
+                        raise WorkflowError(
+                            f"Step `{next_step}` failed and references missing on_error step `{on_error}`."
+                        ) from exc
+                    next_step = on_error
+                    break
 
-        raise WorkflowError(f"Unsupported workflow action: {action}")
+                raise WorkflowError(
+                    f"Step `{next_step}` failed after {attempts} attempt(s): {detail}"
+                ) from exc
 
     return WorkflowResult(
         workflow=workflow_name,
