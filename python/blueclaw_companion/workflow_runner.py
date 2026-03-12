@@ -7,6 +7,8 @@ import subprocess
 import time
 from typing import Any
 
+from .execution_mode import DesktopOptions, DesktopTarget, ExecutionMode, resolve_desktop_options, resolve_desktop_target
+from .perception_backends import resolve_perception_plan
 from .screen_analysis import ScreenAnalysis, analyze_screen
 from .ui_dump_parser import UiDump, load_ui_dump
 
@@ -26,6 +28,9 @@ class WorkflowContext:
     dry_run: bool = False
     approve_sensitive: bool = False
     approve_all_boundaries: bool = False
+    execution_mode: str = "adb"
+    desktop_target: DesktopTarget = field(default_factory=DesktopTarget)
+    desktop_options: DesktopOptions = field(default_factory=DesktopOptions)
     artifacts_dir: Path = ARTIFACTS_DIR
     last_analysis: ScreenAnalysis | None = None
     last_ui_dump: UiDump | None = None
@@ -121,27 +126,47 @@ def parse_running_app(output: str) -> str | None:
 def capture_and_classify(step_id: str, step: dict[str, Any], context: WorkflowContext) -> ScreenAnalysis:
     context.artifacts_dir.mkdir(parents=True, exist_ok=True)
     timestamp = time.strftime("%Y%m%d-%H%M%S")
-    
+
     use_ocr = bool(step.get("use_ocr"))
     capture_screenshot = bool(step.get("screenshot", True))
+    perception_plan = resolve_perception_plan(
+        execution_mode=context.execution_mode,
+        prefer_ocr=use_ocr,
+    )
+    resolved_use_ocr = perception_plan.ocr_backend != "none"
 
     screenshot_path = context.artifacts_dir / f"{context.workflow_name}-{step_id}-{timestamp}.png"
     ui_dump_path = context.artifacts_dir / f"{context.workflow_name}-{step_id}-{timestamp}.xml"
 
+    mode = ExecutionMode.from_value(perception_plan.execution_mode)
+    if perception_plan.capture_backend == "desktop_capture" and mode == ExecutionMode.DESKTOP:
+        from .desktop_state import capture_desktop_state
+
+        result = capture_desktop_state(
+            screenshot_path=screenshot_path,
+            package_name=context.variables.get("PackageName"),
+            use_ocr=resolved_use_ocr,
+            desktop_target=context.desktop_target,
+            desktop_options=context.desktop_options,
+        )
+        context.last_analysis = result.analysis
+        context.last_ui_dump = None
+        return result.analysis
+
     params: dict[str, object] = {
         "UiDumpPath": str(ui_dump_path),
     }
-    if capture_screenshot or use_ocr:
+    if capture_screenshot or resolved_use_ocr:
         params["ScreenshotPath"] = str(screenshot_path)
 
     app_result = run_powershell_script("capture-all.ps1", params, context)
     package_name = parse_running_app(app_result.stdout)
 
     analysis = analyze_screen(
-        screenshot_path=str(screenshot_path) if capture_screenshot or use_ocr else None,
+        screenshot_path=str(screenshot_path) if capture_screenshot or resolved_use_ocr else None,
         ui_dump_path=str(ui_dump_path),
         package_name=package_name,
-        use_ocr=use_ocr,
+        use_ocr=resolved_use_ocr,
     )
     context.last_analysis = analysis
     context.last_ui_dump = load_ui_dump(ui_dump_path)
@@ -174,6 +199,9 @@ def run_workflow(
     dry_run: bool = False,
     approve_sensitive: bool = False,
     approve_all_boundaries: bool = False,
+    execution_mode: str = "adb",
+    desktop_target: DesktopTarget | None = None,
+    desktop_options: DesktopOptions | None = None,
 ) -> WorkflowResult:
     workflow = load_workflow(workflow_name)
     variables = merge_variables(workflow, variable_overrides or {})
@@ -183,6 +211,9 @@ def run_workflow(
         dry_run=dry_run,
         approve_sensitive=approve_sensitive,
         approve_all_boundaries=approve_all_boundaries,
+        execution_mode=execution_mode,
+        desktop_target=desktop_target or resolve_desktop_target(),
+        desktop_options=desktop_options or resolve_desktop_options(),
     )
 
     completed_steps: list[str] = []
@@ -225,6 +256,8 @@ def run_workflow(
             continue
 
         if action == "tap_ui_text":
+            if ExecutionMode.from_value(context.execution_mode) == ExecutionMode.DESKTOP:
+                raise WorkflowError("tap_ui_text requires an Android UI dump and is not available in desktop mode.")
             if not context.last_ui_dump:
                 raise WorkflowError("No UI dump is available for tap_ui_text.")
             labels = format_value(step["labels"], context.variables)

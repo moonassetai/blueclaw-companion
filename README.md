@@ -7,6 +7,10 @@ It is split into three main layers:
 2. **Phase 2 (Workflows)**: JSON declarative steps to string primitives together.
 3. **Mobile Game Learner**: A lightweight python rule-based classifier that chooses and logs the next action for repetitive in-game loops.
 
+There is now also a small **desktop automation layer** for cases where ADB input alone is not enough for BlueStacks/MMORPG interaction. It adds window focus, relative clicks, keyboard sends, and desktop screenshot capture without replacing the existing ADB path.
+
+There is also a lightweight **shortcut acceleration layer** that resolves perception/control backends and prepares future integrations like scrcpy and vision-model classification hooks.
+
 ## Prerequisites
 
 - Windows OS
@@ -45,6 +49,25 @@ Phase 1 scripts are raw PowerShell ADB wrappers located in the `scripts/` folder
 .\scripts\type-text.ps1 -Text "Hello"
 ```
 
+Desktop-side BlueStacks helpers are also available when you need emulator-window interaction instead of ADB:
+
+```powershell
+# Detect and optionally focus the BlueStacks window
+.\scripts\focus-bluestacks.ps1
+
+# Send a key to the BlueStacks window
+.\scripts\send-key.ps1 -Key "{TAB}" -RepeatCount 2 -DelayMs 100
+
+# Click inside the BlueStacks client area using window-relative pixels
+.\scripts\click-window-relative.ps1 -X 300 -Y 500 -RepeatCount 2 -DelayMs 120
+
+# Capture the BlueStacks window, or full screen if needed
+.\scripts\capture-window.ps1 -OutputPath .\artifacts\desktop.png -FullScreenFallback
+
+# Deterministic targeting for dedicated sessions
+.\scripts\focus-bluestacks.ps1 -WindowTitleContains "BlueStacks" -ExpectedClientWidth 1600 -ExpectedClientHeight 900
+```
+
 ## How to Run Phase 2 (Workflow Logic)
 
 Phase 2 uses declarative JSON files located in `workflows/` mapped to corresponding python and shell layers.
@@ -73,9 +96,33 @@ python -m blueclaw_companion learner profiles
 # Execute a direct capture and inference loop on the connected BlueStacks instance
 python -m blueclaw_companion learner run --profile generic --capture --connect --json
 
+# Use desktop capture/input mode instead of ADB
+python -m blueclaw_companion learner run --profile generic --capture --control-mode desktop --window-title-contains "BlueStacks" --expected-client-width 1600 --expected-client-height 900 --use-ocr --json
+
+# Workflow desktop mode (capture path)
+python -m blueclaw_companion workflow run --workflow open-app --execution-mode desktop --window-title-contains "BlueStacks" --desktop-fullscreen-fallback --json
+
 # Test inference against existing artifacts without auto-connecting
 python -m blueclaw_companion learner run --profile generic --xml .\artifacts\dump.xml --json
 ```
+
+`--control-mode adb` remains the default. Use `--control-mode desktop` when the game only reacts reliably to the Windows-side BlueStacks window or when you need keyboard-driven actions.
+
+Desktop target options (`learner run`, `learner loop`, `workflow run`):
+
+- `--window-handle`
+- `--window-title-contains`
+- `--expected-client-width`
+- `--expected-client-height`
+- `--desktop-fullscreen-fallback` / `--no-desktop-fullscreen-fallback`
+
+Env fallback keys:
+
+- `BLUECLAW_WINDOW_HANDLE`
+- `BLUECLAW_WINDOW_TITLE_CONTAINS`
+- `BLUECLAW_EXPECTED_CLIENT_WIDTH`
+- `BLUECLAW_EXPECTED_CLIENT_HEIGHT`
+- `BLUECLAW_DESKTOP_FULLSCREEN_FALLBACK`
 
 ## Repository Organization & Artifacts Behavior
 
@@ -84,3 +131,32 @@ python -m blueclaw_companion learner run --profile generic --xml .\artifacts\dum
 - `workflows/` - Phase 2 declarative JSON template workflows.
 - `references/` - Playbooks and conceptual documentation.
 - `artifacts/` - Temporary output directory for `xml` UI dumps, `png` screenshots, and `jsonl` workflow memories. **Automatically created during execution and should be ignored by Git.** Safe to delete between runs.
+
+## Desktop Automation Notes
+
+- What it solves: emulator-window focus issues, desktop keyboard input, and desktop screenshot capture when ADB-only interaction is not enough for MMORPG loops.
+- What it does not solve: reliable UI hierarchy access on desktop mode, precise OCR-based clicking, or full autonomous gameplay.
+- Reference: `references/desktop-automation.md`
+- RDP guidance: `references/rdp-control.md`
+
+## Shortcut Acceleration Notes
+
+- Backend abstraction files:
+  - `python/blueclaw_companion/perception_backends.py`
+  - `python/blueclaw_companion/control_backends.py`
+  - `python/blueclaw_companion/shortcuts.py`
+- Current active backends:
+  - perception: `adb_ui_dump`, `desktop_capture`, optional `ocr_tesseract`
+  - control: `adb`, `desktop`
+- Future hooks (placeholder only):
+  - perception: `vision_model`
+  - control: `scrcpy`
+
+Inspect resolved shortcut plan locally:
+
+```powershell
+$env:PYTHONPATH = "python"
+python -m blueclaw_companion shortcuts status --mode adb --use-ocr --prefer-scrcpy --prefer-vision-model --json
+```
+
+Reference: `references/shortcut-acceleration.md`

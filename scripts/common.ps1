@@ -17,10 +17,10 @@ function Get-AdbCandidates {
     $candidates = [System.Collections.Generic.List[string]]::new()
 
     $envPaths = @(
-        (Join-Path $env:LOCALAPPDATA "Android\Sdk\platform-tools\adb.exe"),
-        (Join-Path $env:USERPROFILE "AppData\Local\Android\Sdk\platform-tools\adb.exe"),
-        (Join-Path $env:ANDROID_SDK_ROOT "platform-tools\adb.exe"),
-        (Join-Path $env:ANDROID_HOME "platform-tools\adb.exe"),
+        $(if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA "Android\Sdk\platform-tools\adb.exe" }),
+        $(if ($env:USERPROFILE) { Join-Path $env:USERPROFILE "AppData\Local\Android\Sdk\platform-tools\adb.exe" }),
+        $(if ($env:ANDROID_SDK_ROOT) { Join-Path $env:ANDROID_SDK_ROOT "platform-tools\adb.exe" }),
+        $(if ($env:ANDROID_HOME) { Join-Path $env:ANDROID_HOME "platform-tools\adb.exe" }),
         "C:\Program Files\BlueStacks_nxt\HD-Adb.exe"
     )
 
@@ -51,7 +51,7 @@ function Resolve-AdbPath {
         return (Resolve-Path $AdbPath).Path
     }
 
-    $candidates = Get-AdbCandidates
+    $candidates = @(Get-AdbCandidates)
     if ($candidates.Count -eq 0) {
         throw "No adb binary found. Install Android SDK platform-tools or BlueStacks."
     }
@@ -95,6 +95,29 @@ function Get-BluestacksLikelyPorts {
     param()
 
     return @(5555, 5554, 5556, 5557, 5558, 5559, 5560, 5561, 5562, 5563, 5564, 5565)
+}
+
+function Get-BluestacksPlayerCandidates {
+    [CmdletBinding()]
+    param()
+
+    return @(
+        'C:\Program Files\BlueStacks_nxt\HD-Player.exe',
+        'C:\Program Files\BlueStacks\HD-Player.exe'
+    )
+}
+
+function Start-BluestacksPlayer {
+    [CmdletBinding()]
+    param()
+
+    $player = Get-BluestacksPlayerCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if (-not $player) {
+        return $false
+    }
+
+    Start-Process -FilePath $player | Out-Null
+    return $true
 }
 
 function Find-BluestacksEndpoint {
@@ -244,7 +267,8 @@ function Invoke-AdbOnDevice {
         [switch]$IgnoreExitCode
     )
 
-    return Invoke-Adb -AdbPath $AdbPath -Arguments @("-s", $Device) + $Arguments -IgnoreExitCode:$IgnoreExitCode
+    $adbArguments = @("-s", $Device) + $Arguments
+    return Invoke-Adb -AdbPath $AdbPath -Arguments $adbArguments -IgnoreExitCode:$IgnoreExitCode
 }
 
 function Ensure-OutputDirectory {

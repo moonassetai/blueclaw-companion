@@ -10,12 +10,30 @@ $resolvedAdb = Resolve-AdbPath -AdbPath $AdbPath
 Write-Host "Using adb: $resolvedAdb"
 
 $target = $Device
-$devices = Get-AdbDeviceLines -AdbPath $resolvedAdb
+$devices = @(Get-AdbDeviceLines -AdbPath $resolvedAdb)
 if (-not $target) {
-    $target = Find-BluestacksEndpoint
-    if (-not $target) {
-        Write-Error "No active BlueStacks endpoint found."
-        exit 1
+    $existingOnline = @($devices | Where-Object { $_.State -eq 'device' -and $_.Serial -match '^(127\.0\.0\.1:\d+|emulator-\d+)$' })
+    if ($existingOnline.Count -ge 1) {
+        $target = $existingOnline[0].Serial
+    }
+    else {
+        $target = Find-BluestacksEndpoint
+        if (-not $target) {
+            $started = Start-BluestacksPlayer
+            if ($started) {
+                Start-Sleep -Seconds 15
+                $target = Find-BluestacksEndpoint
+                $devices = @(Get-AdbDeviceLines -AdbPath $resolvedAdb)
+                $existingOnline = @($devices | Where-Object { $_.State -eq 'device' -and $_.Serial -match '^(127\.0\.0\.1:\d+|emulator-\d+)$' })
+                if ($existingOnline.Count -ge 1) {
+                    $target = $existingOnline[0].Serial
+                }
+            }
+        }
+        if (-not $target) {
+            Write-Error "No active BlueStacks endpoint found."
+            exit 1
+        }
     }
 }
 

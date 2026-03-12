@@ -18,6 +18,11 @@ class ActionTarget:
     type: str = "tap"
     x: int | None = None
     y: int | None = None
+    key: str | None = None
+    repeat_count: int = 1
+    repeat_delay_ms: int = 120
+    reference_width: int = 1080
+    reference_height: int = 1920
     labels: list[str] = field(default_factory=list)
     notes: str = ""
 
